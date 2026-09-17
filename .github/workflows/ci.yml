@@ -3,7 +3,7 @@ on:
   push:
   pull_request:
 jobs:
-  build:
+  rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,4 +16,76 @@ jobs:
       - run: cargo test --workspace
       - run: cargo build --workspace --release
       - name: audit
-        run: cargo install cargo-audit --locked && cargo audit || echo "audit: review advisories above"
+        # Strict: fails on any vulnerability. Unmaintained warnings print
+        # but exit 0; see docs/security.md for the tracked rustls-pemfile note.
+        run: cargo install cargo-audit --locked && cargo audit
+
+  docker-demo:
+    # Guards the Dockerfiles and compose wiring (this job would have caught
+    # the stale rust:1.78 base, the build-context paths, and the DNS-only
+    # upstream crash). Mirrors docs/interview-demo.md against the Compose
+    # fleet with all default ports.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f deploy/compose.yaml build
+      - run: docker compose -f deploy/compose.yaml up -d
+      - name: wait for healthy fleet
+        run: |
+          for i in $(seq 1 24); do
+            n=$(docker compose -f deploy/compose.yaml ps --format '{{.Status}}' | grep -c -E '^Up' || true)
+            [ "$n" = "6" ] && break
+            sleep 10
+          done
+          docker compose -f deploy/compose.yaml ps
+          test "$(docker inspect --format '{{.State.Health.Status}}' edgewarden-demo-control-plane-1)" = "healthy"
+      - name: registration
+        run: |
+          sleep 10
+          curl -sf localhost:8080/devices | python3 -c "import json,sys; assert len(json.load(sys.stdin)) == 3, 'want 3 edges'"
+      - name: push policy and verify reconciliation
+        run: |
+          curl -sf -X POST localhost:8080/policy -H 'content-type: application/json' \
+            -d '{"version":42,"max_connections":512,"idle_timeout_secs":300,"default_upstream":"upstream:18081"}'
+          for i in $(seq 1 12); do
+            sleep 5
+            n=$(curl -s localhost:8080/devices | python3 -c "import json,sys; print(sum(1 for d in json.load(sys.stdin) if d['reported_policy_version'] == '42'))")
+            [ "$n" = "3" ] && break
+            [ "$i" = "12" ] && exit 1
+          done
+      - name: dataplane echo on all edges
+        run: |
+          python3 - <<'PY'
+          import socket
+          for p in (18080, 18082, 18083):
+              s = socket.create_connection(("127.0.0.1", p), timeout=5)
+              msg = b"ci-echo"
+              s.sendall(msg)
+              data = b""
+              while len(data) < len(msg):
+                  c = s.recv(4096)
+                  if not c:
+                      break
+                  data += c
+              assert data == msg, (p, data)
+              s.close()
+          print("echo ok on all edges")
+          PY
+      - name: partition tolerance
+        run: |
+          docker stop edgewarden-demo-control-plane-1
+          sleep 3
+          python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 18080), timeout=5); s.sendall(b'x'); assert s.recv(1) == b'x'; print('forwarding during outage: ok')"
+          docker start edgewarden-demo-control-plane-1
+          sleep 12
+          curl -sf localhost:8080/devices | python3 -c "import json,sys; assert len(json.load(sys.stdin)) == 3"
+      - name: metrics
+        run: |
+          curl -sf localhost:19091/metrics | grep -q '^edge_policy_version 42'
+          curl -sf localhost:9090/api/v1/targets | grep -q '"health":"up"'
+      - name: dump logs on failure
+        if: failure()
+        run: docker compose -f deploy/compose.yaml logs --tail=100
+      - name: down
+        if: always()
+        run: docker compose -f deploy/compose.yaml down -v

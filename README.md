@@ -93,9 +93,9 @@ Kill the control plane mid-day; forwarding continues on last-known-good and
 reconciles when the link returns. This is the partition test made manual:
 
 ```sh
-printf 'lesson-plan' | ncat 127.0.0.1 18080   # works while cloud is up
+python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 18080)); s.sendall(b'lesson-plan'); print(s.recv(11))"  # works while cloud is up
 # stop control-plane (Ctrl-C / docker stop)
-printf 'still-teaching' | ncat 127.0.0.1 18080  # still echoes back
+python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 18080)); s.sendall(b'still-teaching'); print(s.recv(14))"  # still echoes back
 # restart control-plane; agent re-registers and converges automatically
 ```
 
@@ -186,9 +186,12 @@ let bypass = ExecBypassController::new(
 ## TCP dataplane
 
 Tokio `copy_bidirectional`, semaphore-bounded concurrency, connect + idle
-timeouts, graceful drain, atomic counters. TPROXY is opt-in and isolated
-(`edge-proxy::transparent`, `scripts/nftables-example.sh`); dev mode needs
-no root. See `docs/proxy-datapath.md`.
+timeouts, graceful drain, atomic counters. Upstreams accept `IP:port` or
+DNS `host:port` (resolved once at startup, so Compose/K8s service names
+work); explicit static config applies until a synced policy overrides it.
+TPROXY is opt-in and isolated (`edge-proxy::transparent`,
+`scripts/nftables-example.sh`); dev mode needs no root. See
+`docs/proxy-datapath.md`.
 
 ## Fleet control plane
 
