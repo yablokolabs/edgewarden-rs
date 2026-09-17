@@ -1,18 +1,22 @@
-//! Simulated atomic A/B OTA update state machine.
+//! Atomic A/B OTA update state machine.
 //!
-//! Nothing here touches real disk partitions. Two directory/slot records
-//! (`A` and `B`) model the slots; every transition is persisted to a JSON
-//! journal so a process crash or power-loss simulation resumes correctly.
-//! Artifact integrity is SHA-256 plus a dev-reference HMAC signature
-//! (production: Sigstore/cosign or TUF — see `docs/security.md`).
+//! Slot model: two directory/slot records (`A` and `B`) stand in for real
+//! disk partitions (see below on production mapping). Every transition is
+//! persisted to a JSON journal (atomic rename + directory fsync) so a
+//! process crash or power loss resumes correctly.
+//!
+//! Artifact integrity is SHA-256 plus a real Ed25519 signature over the
+//! artifact bytes, verified against a baked-in release verifying key.
+//! Production mapping: real bootloader slot selection (e.g. `rauc`,
+//! `bootupd`, dm-verity) replaces the directory flip; key distribution and
+//! revocation ride the existing fleet PKI (see `docs/security.md`). The
+//! state machine shape stays the same.
 
-use hmac::{Hmac, Mac};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-
-type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Error)]
 pub enum OtaError {
@@ -28,6 +32,13 @@ pub enum OtaError {
     InvalidTransition(OtaState),
     #[error("health check failed: {0}")]
     HealthCheck(String),
+    #[error("downgrade rejected: candidate {candidate} <= committed {committed}")]
+    DowngradeRejected {
+        candidate: String,
+        committed: String,
+    },
+    #[error("bad key: {0}")]
+    BadKey(String),
     #[error("{0}")]
     Other(String),
 }
@@ -80,6 +91,36 @@ struct PersistedOta {
     candidate_slot: Option<Slot>,
     candidate_version: Option<String>,
     last_error: Option<String>,
+    /// Highest version ever committed on this device. Used for rollback
+    /// protection: a signed-but-older artifact is rejected at
+    /// `start_download` instead of being installed.
+    #[serde(default)]
+    highest_committed_version: Option<String>,
+}
+
+/// Compare dotted version strings numerically per component, falling back
+/// to lexical ordering for non-numeric components. Returns Less / Equal /
+/// Greater in the usual sense.
+pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ai = a.split('.');
+    let mut bi = b.split('.');
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, _) => return Ordering::Less,
+            (_, None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(nx), Ok(ny)) => nx.cmp(&ny),
+                    _ => x.cmp(y),
+                };
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +130,10 @@ pub struct HealthGate {
 
 /// OTA manager. All mutating steps persist before returning so a crash at
 /// any point can be recovered with [`OtaManager::recover`].
+///
+/// `verifying_key` is the 32-byte Ed25519 release verifying (public) key
+/// baked into the device image. The corresponding signing key lives only in
+/// release infrastructure — never on the device.
 pub struct OtaManager {
     dir: PathBuf,
     state: OtaState,
@@ -97,12 +142,12 @@ pub struct OtaManager {
     candidate_version: Option<String>,
     candidate_bytes: Option<Vec<u8>>,
     last_error: Option<String>,
-    /// Dev signing key for HMAC. Never ship a hardcoded production key.
-    dev_key: Vec<u8>,
+    highest_committed_version: Option<String>,
+    verifying_key: [u8; 32],
 }
 
 impl OtaManager {
-    pub fn open(dir: impl AsRef<Path>, dev_key: &[u8]) -> Result<Self, OtaError> {
+    pub fn open(dir: impl AsRef<Path>, verifying_key: &[u8; 32]) -> Result<Self, OtaError> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
         let persisted = Self::journal_path(&dir);
@@ -117,7 +162,8 @@ impl OtaManager {
                 candidate_version: p.candidate_version,
                 candidate_bytes: None, // payload itself is re-downloaded after crash
                 last_error: p.last_error,
-                dev_key: dev_key.to_vec(),
+                highest_committed_version: p.highest_committed_version,
+                verifying_key: *verifying_key,
             })
         } else {
             let m = Self {
@@ -128,7 +174,8 @@ impl OtaManager {
                 candidate_version: None,
                 candidate_bytes: None,
                 last_error: None,
-                dev_key: dev_key.to_vec(),
+                highest_committed_version: None,
+                verifying_key: *verifying_key,
             };
             m.persist()?;
             Ok(m)
@@ -146,10 +193,19 @@ impl OtaManager {
             candidate_slot: self.candidate_slot,
             candidate_version: self.candidate_version.clone(),
             last_error: self.last_error.clone(),
+            highest_committed_version: self.highest_committed_version.clone(),
         };
         let tmp = Self::journal_path(&self.dir).with_extension("tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(&p)?)?;
+        // Best-effort durability: fsync the file, rename, then fsync the
+        // directory so the rename survives a power loss.
+        if let Ok(f) = std::fs::File::open(&tmp) {
+            let _ = f.sync_all();
+        }
         std::fs::rename(&tmp, Self::journal_path(&self.dir))?;
+        if let Ok(d) = std::fs::File::open(&self.dir) {
+            let _ = d.sync_all();
+        }
         Ok(())
     }
 
@@ -170,7 +226,9 @@ impl OtaManager {
 
     /// Begin an update. Idempotent: starting the same version twice while
     /// already staged/pending is a no-op success; a *different* version
-    /// while busy is an error.
+    /// while busy is an error. Downgrades at or below the highest committed
+    /// version are rejected (rollback-attack protection); genuine rollback
+    /// is the slot-pointer flip in [`OtaManager::rollback`], not a reinstall.
     pub fn start_download(&mut self, manifest: &OtaManifest) -> Result<bool, OtaError> {
         if let Some(v) = &self.candidate_version {
             if v == &manifest.version
@@ -189,6 +247,14 @@ impl OtaManager {
                     "busy in {:?}, cannot start {}",
                     self.state, manifest.version
                 )));
+            }
+        }
+        if let Some(committed) = &self.highest_committed_version {
+            if compare_versions(&manifest.version, committed) != std::cmp::Ordering::Greater {
+                return Err(OtaError::DowngradeRejected {
+                    candidate: manifest.version.clone(),
+                    committed: committed.clone(),
+                });
             }
         }
         self.candidate_slot = Some(self.active_slot.other());
@@ -212,7 +278,7 @@ impl OtaManager {
         Ok(())
     }
 
-    /// Verify SHA-256 and dev HMAC signature over the staged bytes.
+    /// Verify SHA-256 and the Ed25519 release signature over the staged bytes.
     pub fn verify(&mut self, manifest: &OtaManifest) -> Result<(), OtaError> {
         if self.state != OtaState::Downloading {
             return Err(OtaError::InvalidTransition(self.state));
@@ -229,11 +295,13 @@ impl OtaManager {
                 got,
             });
         }
-        let mut mac = HmacSha256::new_from_slice(&self.dev_key)
-            .map_err(|_| OtaError::Other("bad key".into()))?;
-        mac.update(&bytes);
-        let sig = hex::encode(mac.finalize().into_bytes());
-        if sig != manifest.signature_hex.to_lowercase() {
+        let sig_bytes =
+            hex::decode(manifest.signature_hex.trim()).map_err(|_| OtaError::BadSignature)?;
+        let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| OtaError::BadSignature)?;
+        let signature = Signature::from_bytes(&sig_arr);
+        let verifying = VerifyingKey::from_bytes(&self.verifying_key)
+            .map_err(|e| OtaError::BadKey(e.to_string()))?;
+        if verifying.verify(&bytes, &signature).is_err() {
             self.last_error = Some("bad signature".into());
             self.set_state(OtaState::Failed)?;
             return Err(OtaError::BadSignature);
@@ -275,6 +343,15 @@ impl OtaManager {
         }
         if healthy {
             self.active_slot = self.candidate_slot.unwrap_or(self.active_slot.other());
+            if let Some(v) = self.candidate_version.clone() {
+                let dominated = match &self.highest_committed_version {
+                    Some(h) => compare_versions(&v, h) == std::cmp::Ordering::Greater,
+                    None => true,
+                };
+                if dominated {
+                    self.highest_committed_version = Some(v);
+                }
+            }
             self.candidate_slot = None;
             self.candidate_version = None;
             self.candidate_bytes = None;
@@ -321,22 +398,35 @@ impl OtaManager {
     }
 }
 
-/// Helpers used by tests and the control plane to mint dev manifests.
-pub fn dev_sign(bytes: &[u8], key: &[u8]) -> (String, String) {
+/// Release signing helpers. The signing key lives in release
+/// infrastructure only; devices carry the verifying key. Tests mint a fixed
+/// keypair from a seed — production loads keys from a KMS/HSM.
+pub fn signing_key_from_seed(seed: &[u8; 32]) -> SigningKey {
+    SigningKey::from_bytes(seed)
+}
+
+pub fn verifying_key_bytes(signing: &SigningKey) -> [u8; 32] {
+    signing.verifying_key().to_bytes()
+}
+
+/// Sign an artifact: returns `(sha256_hex, ed25519_signature_hex)`.
+pub fn sign_artifact(bytes: &[u8], signing: &SigningKey) -> (String, String) {
     let digest = Sha256::digest(bytes);
-    let mut mac = HmacSha256::new_from_slice(key).expect("hmac key");
-    mac.update(bytes);
-    (
-        hex::encode(digest),
-        hex::encode(mac.finalize().into_bytes()),
-    )
+    let sig = signing.sign(bytes);
+    (hex::encode(digest), hex::encode(sig.to_bytes()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const KEY: &[u8] = b"test-dev-key-1234";
+    const SEED: [u8; 32] = *b"edgewarden-test-seed-00000000001";
+
+    fn test_keys() -> (SigningKey, [u8; 32]) {
+        let sk = signing_key_from_seed(&SEED);
+        let vk = verifying_key_bytes(&sk);
+        (sk, vk)
+    }
 
     fn tmp_dir(name: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
@@ -353,7 +443,8 @@ mod tests {
     }
 
     fn manifest_for(payload: &[u8], version: &str) -> OtaManifest {
-        let (h, s) = dev_sign(payload, KEY);
+        let (sk, _) = test_keys();
+        let (h, s) = sign_artifact(payload, &sk);
         OtaManifest {
             version: version.into(),
             artifact_sha256_hex: h,
@@ -362,10 +453,15 @@ mod tests {
         }
     }
 
+    fn open_test(dir: &Path) -> OtaManager {
+        let (_, vk) = test_keys();
+        OtaManager::open(dir, &vk).unwrap()
+    }
+
     fn happy_path(dir: &Path, version: &str) -> OtaManager {
         let payload = format!("artifact-{version}").into_bytes();
         let m = manifest_for(&payload, version);
-        let mut ota = OtaManager::open(dir, KEY).unwrap();
+        let mut ota = open_test(dir);
         ota.start_download(&m).unwrap();
         ota.ingest_chunk(&payload, &m).unwrap();
         ota.verify(&m).unwrap();
@@ -389,7 +485,7 @@ mod tests {
         let d = tmp_dir("corrupt");
         let payload = b"good-bytes";
         let m = manifest_for(payload, "2.0.0");
-        let mut ota = OtaManager::open(&d, KEY).unwrap();
+        let mut ota = open_test(&d);
         ota.start_download(&m).unwrap();
         ota.ingest_chunk(b"tampered-bytes", &m).unwrap();
         let r = ota.verify(&m);
@@ -403,14 +499,38 @@ mod tests {
     fn bad_signature_fails_verify() {
         let d = tmp_dir("sig");
         let payload = b"payload";
-        let (h, _) = dev_sign(payload, KEY);
+        let (sk, _) = test_keys();
+        // Sign *different* bytes so the signature is well-formed but wrong.
+        let (_, wrong_sig) = sign_artifact(b"something-else", &sk);
+        let digest = sha2::Sha256::digest(payload);
+        let m = OtaManifest {
+            version: "2.0.0".into(),
+            artifact_sha256_hex: hex::encode(digest),
+            signature_hex: wrong_sig,
+            size_bytes: payload.len() as u64,
+        };
+        let mut ota = open_test(&d);
+        ota.start_download(&m).unwrap();
+        ota.ingest_chunk(payload, &m).unwrap();
+        assert!(matches!(ota.verify(&m), Err(OtaError::BadSignature)));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn wrong_key_fails_verify() {
+        // Artifact signed by an attacker's key must not verify against the
+        // baked-in release key.
+        let d = tmp_dir("wrongkey");
+        let payload = b"payload";
+        let attacker = signing_key_from_seed(b"attacker-seed-000000000000000001");
+        let (h, s) = sign_artifact(payload, &attacker);
         let m = OtaManifest {
             version: "2.0.0".into(),
             artifact_sha256_hex: h,
-            signature_hex: "deadbeef".into(),
+            signature_hex: s,
             size_bytes: payload.len() as u64,
         };
-        let mut ota = OtaManager::open(&d, KEY).unwrap();
+        let mut ota = open_test(&d);
         ota.start_download(&m).unwrap();
         ota.ingest_chunk(payload, &m).unwrap();
         assert!(matches!(ota.verify(&m), Err(OtaError::BadSignature)));
@@ -422,7 +542,7 @@ mod tests {
         let d = tmp_dir("rollback");
         let payload = b"artifact-3".to_vec();
         let m = manifest_for(&payload, "3.0.0");
-        let mut ota = OtaManager::open(&d, KEY).unwrap();
+        let mut ota = open_test(&d);
         ota.start_download(&m).unwrap();
         ota.ingest_chunk(&payload, &m).unwrap();
         ota.verify(&m).unwrap();
@@ -440,12 +560,12 @@ mod tests {
         let payload = b"artifact-4".to_vec();
         let m = manifest_for(&payload, "4.0.0");
         {
-            let mut ota = OtaManager::open(&d, KEY).unwrap();
+            let mut ota = open_test(&d);
             ota.start_download(&m).unwrap();
             ota.ingest_chunk(&payload[..4], &m).unwrap();
             // Drop without persisting further == crash.
         }
-        let mut ota2 = OtaManager::open(&d, KEY).unwrap();
+        let mut ota2 = open_test(&d);
         let resumed = ota2.recover().unwrap();
         assert_eq!(resumed, OtaState::Idle);
         let _ = std::fs::remove_dir_all(&d);
@@ -457,7 +577,7 @@ mod tests {
         let payload = b"artifact-5".to_vec();
         let m = manifest_for(&payload, "5.0.0");
         {
-            let mut ota = OtaManager::open(&d, KEY).unwrap();
+            let mut ota = open_test(&d);
             ota.start_download(&m).unwrap();
             ota.ingest_chunk(&payload, &m).unwrap();
             ota.verify(&m).unwrap();
@@ -465,7 +585,7 @@ mod tests {
             ota.simulate_reboot().unwrap();
             // Crash before health verdict.
         }
-        let mut ota2 = OtaManager::open(&d, KEY).unwrap();
+        let mut ota2 = open_test(&d);
         assert_eq!(ota2.recover().unwrap(), OtaState::HealthChecking);
         ota2.health_check(false, "post-power health fail").unwrap();
         assert_eq!(ota2.state(), OtaState::RolledBack);
@@ -478,9 +598,40 @@ mod tests {
         let d = tmp_dir("dup");
         let payload = b"artifact-6".to_vec();
         let m = manifest_for(&payload, "6.0.0");
-        let mut ota = OtaManager::open(&d, KEY).unwrap();
+        let mut ota = open_test(&d);
         assert!(ota.start_download(&m).unwrap());
         assert!(!ota.start_download(&m).unwrap());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn signed_downgrade_is_rejected() {
+        // Even a correctly signed older artifact must not install over a
+        // newer commit (rollback-attack protection).
+        let d = tmp_dir("downgrade");
+        let mut ota = happy_path(&d, "2.0.0");
+        assert_eq!(ota.state(), OtaState::Committed);
+        let old_payload = b"artifact-1.0.0".to_vec();
+        let old = manifest_for(&old_payload, "1.0.0");
+        let err = ota.start_download(&old).unwrap_err();
+        assert!(
+            matches!(err, OtaError::DowngradeRejected { .. }),
+            "expected DowngradeRejected, got {err:?}"
+        );
+        // And the rejection survives a restart (journaled).
+        drop(ota);
+        let mut ota2 = open_test(&d);
+        let err2 = ota2.start_download(&old).unwrap_err();
+        assert!(matches!(err2, OtaError::DowngradeRejected { .. }));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn version_compare_orders_numerically() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_versions("2.0.0", "10.0.0"), Ordering::Less);
+        assert_eq!(compare_versions("10.0.0", "2.0.0"), Ordering::Greater);
+        assert_eq!(compare_versions("1.2.3", "1.2.3"), Ordering::Equal);
+        assert_eq!(compare_versions("1.2", "1.2.0"), Ordering::Less);
     }
 }
