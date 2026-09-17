@@ -3,11 +3,6 @@
 [![CI](https://github.com/yablokolabs/edgewarden-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/yablokolabs/edgewarden-rs/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/yablokolabs/edgewarden-rs)](https://github.com/yablokolabs/edgewarden-rs/releases)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
-[![edge-state](https://img.shields.io/crates/v/edge-state)](https://crates.io/crates/edge-state)
-[![edge-ota](https://img.shields.io/crates/v/edge-ota)](https://crates.io/crates/edge-ota)
-[![edge-health](https://img.shields.io/crates/v/edge-health)](https://crates.io/crates/edge-health)
-[![edge-telemetry](https://img.shields.io/crates/v/edge-telemetry)](https://crates.io/crates/edge-telemetry)
-[![edge-protocol](https://img.shields.io/crates/v/edge-protocol)](https://crates.io/crates/edge-protocol)
 
 Cloud-managed Rust edge proxy appliance reference architecture.
 
@@ -275,6 +270,26 @@ Portable mode by default. For interception: nftables → TPROXY →
 `ADR-003` at-least-once · `ADR-004` immutable edge · `ADR-005` A/B OTA ·
 `ADR-006` dataplane independence · `ADR-007` TPROXY · `ADR-008` eBPF
 boundaries (userspace first; no buzzword eBPF shipped).
+
+## Crates
+
+Reusable libraries published on crates.io (binaries ship via
+[GitHub releases](https://github.com/yablokolabs/edgewarden-rs/releases)
+and GHCR images instead):
+
+| Crate | Version | What it is |
+|---|---|---|
+| [edge-protocol](https://crates.io/crates/edge-protocol) | ![edge-protocol](https://img.shields.io/crates/v/edge-protocol) | Outbound-only fleet gRPC protocol + jittered reconnect backoff |
+| [edge-state](https://crates.io/crates/edge-state) | ![edge-state](https://img.shields.io/crates/v/edge-state) | Desired vs reported reconciliation with durable last-known-good |
+| [edge-ota](https://crates.io/crates/edge-ota) | ![edge-ota](https://img.shields.io/crates/v/edge-ota) | Persistent A/B OTA machine, Ed25519 verify, rollback protection |
+| [edge-health](https://crates.io/crates/edge-health) | ![edge-health](https://img.shields.io/crates/v/edge-health) | Supervision, watchdogs, fail-open bypass control |
+| [edge-telemetry](https://crates.io/crates/edge-telemetry) | ![edge-telemetry](https://img.shields.io/crates/v/edge-telemetry) | Prometheus metrics + `/metrics` endpoint without global state |
+
+```toml
+[dependencies]
+edge-state = "0.1"
+edge-ota = "0.1"
+```
 
 ## Development
 
