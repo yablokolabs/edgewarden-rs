@@ -71,14 +71,16 @@ async fn main() -> anyhow::Result<()> {
     };
     let probe = EdgeAgent::new(agent_cfg.clone(), metrics.clone()).context("open state store")?;
     let last_good = probe.last_good_policy();
+    // Explicit static config wins until the cloud has actually pushed a
+    // policy: the compiled default must never shadow the operator. Once a
+    // policy has synced, last-known-good wins (partition tolerance).
+    let use_policy = probe.has_synced_policy();
     drop(probe);
 
     let static_upstream = resolve_upstream(&args.upstream)
         .await
         .with_context(|| format!("resolving upstream {}", args.upstream))?;
-    let policy_upstream = if last_good.default_upstream.is_empty() {
-        None
-    } else {
+    let policy_upstream = if use_policy && !last_good.default_upstream.is_empty() {
         match resolve_upstream(&last_good.default_upstream).await {
             Ok(a) => Some(a),
             Err(e) => {
@@ -86,6 +88,8 @@ async fn main() -> anyhow::Result<()> {
                 None
             }
         }
+    } else {
+        None
     };
     let proxy_cfg = edge_proxy::ProxyConfig {
         listen_addr: args.listen,

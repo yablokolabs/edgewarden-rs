@@ -83,6 +83,16 @@ impl EdgeAgent {
         self.store.reported.policy_version
     }
 
+    pub fn reported_applied_seq(&self) -> u64 {
+        self.store.reported.applied_seq
+    }
+
+    /// True once any desired state has been applied from the cloud. Before
+    /// that, the appliance runs purely on static operator config.
+    pub fn has_synced_policy(&self) -> bool {
+        self.store.reported.applied_seq > 0 || self.store.reported.policy_version > 0
+    }
+
     pub fn last_good_policy(&self) -> LocalPolicy {
         self.store.last_good_policy.clone()
     }
