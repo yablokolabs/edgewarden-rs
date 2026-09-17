@@ -1,5 +1,9 @@
 # edge-state
 
+[![CI](https://github.com/yablokolabs/edgewarden-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/yablokolabs/edgewarden-rs/actions/workflows/ci.yml)
+[![edge-state](https://img.shields.io/crates/v/edge-state)](https://crates.io/crates/edge-state)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](https://github.com/yablokolabs/edgewarden-rs/blob/main/LICENSE)
+
 Desired vs reported state reconciliation with durable last-known-good for
 edge fleets, from the [EdgeWarden](https://github.com/yablokolabs/edgewarden-rs)
 reference architecture.

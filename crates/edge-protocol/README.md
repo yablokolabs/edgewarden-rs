@@ -1,5 +1,9 @@
 # edge-protocol
 
+[![CI](https://github.com/yablokolabs/edgewarden-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/yablokolabs/edgewarden-rs/actions/workflows/ci.yml)
+[![edge-protocol](https://img.shields.io/crates/v/edge-protocol)](https://crates.io/crates/edge-protocol)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](https://github.com/yablokolabs/edgewarden-rs/blob/main/LICENSE)
+
 Outbound-only fleet gRPC protocol and reconnect backoff for cloud-managed
 edge appliances, from the [EdgeWarden](https://github.com/yablokolabs/edgewarden-rs)
 reference architecture.

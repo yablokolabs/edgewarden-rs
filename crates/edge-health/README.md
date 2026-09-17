@@ -1,5 +1,9 @@
 # edge-health
 
+[![CI](https://github.com/yablokolabs/edgewarden-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/yablokolabs/edgewarden-rs/actions/workflows/ci.yml)
+[![edge-health](https://img.shields.io/crates/v/edge-health)](https://crates.io/crates/edge-health)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](https://github.com/yablokolabs/edgewarden-rs/blob/main/LICENSE)
+
 Health supervision, watchdogs, and fail-open bypass control for edge
 appliances, from the [EdgeWarden](https://github.com/yablokolabs/edgewarden-rs)
 reference architecture.

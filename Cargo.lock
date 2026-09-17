@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "edge-health"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "serde",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "edge-ota"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "edge-protocol"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "prost",
  "rand",
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "edge-state"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "criterion",
  "serde",
@@ -617,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "edge-telemetry"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "prometheus",
