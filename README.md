@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/yablokolabs/edgewarden-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/yablokolabs/edgewarden-rs/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/yablokolabs/edgewarden-rs)](https://github.com/yablokolabs/edgewarden-rs/releases) [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
 
+Release [`v0.1.0`](https://github.com/yablokolabs/edgewarden-rs/releases/tag/v0.1.0) · crates.io: [`edge-protocol`](https://crates.io/crates/edge-protocol) · [`edge-state`](https://crates.io/crates/edge-state) · [`edge-ota`](https://crates.io/crates/edge-ota) · [`edge-health`](https://crates.io/crates/edge-health) · [`edge-telemetry`](https://crates.io/crates/edge-telemetry) · License: MIT OR Apache-2.0
+
 Cloud-managed Rust edge proxy appliance reference architecture.
 
 ![EdgeWarden architecture](docs/assets/edgewarden-architecture.svg)
