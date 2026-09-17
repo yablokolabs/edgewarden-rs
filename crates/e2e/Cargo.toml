@@ -1,0 +1,17 @@
+[package]
+name = "e2e"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dev-dependencies]
+tokio = { workspace = true }
+tonic = { workspace = true }
+tokio-stream = { workspace = true }
+serde_json = { workspace = true }
+edge-protocol = { path = "../edge-protocol" }
+edge-state = { path = "../edge-state" }
+edge-proxy = { path = "../edge-proxy" }
+edge-agent = { path = "../edge-agent" }
+edge-telemetry = { path = "../edge-telemetry" }
+control-plane = { path = "../control-plane" }
