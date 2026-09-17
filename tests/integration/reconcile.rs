@@ -6,9 +6,7 @@ use edge_agent::{AgentConfig, EdgeAgent};
 use edge_protocol::fleet::{fleet_service_server::FleetServiceServer, Policy};
 use std::time::Duration;
 
-async fn start_cp(
-    registry: Registry,
-) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+async fn start_cp(registry: Registry) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     let svc = FleetServiceImpl::new(registry);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
@@ -55,6 +53,9 @@ async fn policy_push_converges_and_duplicates_are_safe() {
             state_path: state_path.clone(),
             heartbeat_interval: Duration::from_secs(1),
             tls_ca: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_domain: None,
         },
         m,
     )
@@ -94,6 +95,9 @@ async fn invalid_policy_version_does_not_break_agent() {
             state_path: state_path.clone(),
             heartbeat_interval: Duration::from_secs(1),
             tls_ca: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_domain: None,
         },
         m,
     )

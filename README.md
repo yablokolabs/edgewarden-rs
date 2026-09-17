@@ -145,14 +145,42 @@ curl -s localhost:19091/metrics | grep -E 'edge_control_plane_connected|edge_pro
 ./scripts/failure-demo.sh   # end-to-end fault tour: outage, crash, corrupt config, bad OTA
 ```
 
-**6. Stand up mTLS for a pilot school.**
-Mint short-lived dev certs (7-day, gitignored) and restart both ends with TLS:
+**6. Stand up enforced mTLS for a pilot school.**
+Mint short-lived dev certs (7-day, gitignored) and restart both ends. The
+server refuses one-way TLS, and the agent fails fast on a half-configured
+identity — there is no silent downgrade:
 
 ```sh
 ./scripts/gen-certs.sh certs
-CONTROL_TLS_CERT=$PWD/certs/server.crt CONTROL_TLS_KEY=$PWD/certs/server.key ./target/debug/control-plane &
-EDGE_TLS_CA=$PWD/certs/ca.crt EDGE_CONTROL_PLANE=https://127.0.0.1:50051 ./target/debug/edge-agent &
+CONTROL_TLS_CERT=$PWD/certs/server.crt CONTROL_TLS_KEY=$PWD/certs/server.key \
+  CONTROL_TLS_CLIENT_CA=$PWD/certs/ca.crt ./target/debug/control-plane &
+EDGE_TLS_CA=$PWD/certs/ca.crt EDGE_TLS_CERT=$PWD/certs/edge-01.crt EDGE_TLS_KEY=$PWD/certs/edge-01.key \
+  EDGE_CONTROL_PLANE=https://127.0.0.1:50051 ./target/debug/edge-agent &
+curl -s localhost:8080/devices | grep -E 'device_id|reported_policy'  # enrolled over mTLS
 # production: replace with EST/SPIRE-issued certs + pinned CA (docs/security.md)
+```
+
+**7. Restart the control plane without losing the fleet.**
+Registry snapshots persist roster + desired state; liveness ages out until
+edges check in again:
+
+```sh
+CONTROL_PERSIST_PATH=/var/lib/edgewarden/registry.json ./target/debug/control-plane &
+curl -s -X POST localhost:8080/policy -H 'content-type: application/json' -d '{"version":44}'
+# restart the control plane process; /devices still lists the fleet and version 44
+```
+
+**8. Wire a real bypass relay.**
+`MockBypassController` is for dev/test. Production sites plug hardware
+commands into `ExecBypassController` (failed commands leave state unchanged
+so the supervisor retries instead of assuming the relay moved):
+
+```rust
+let bypass = ExecBypassController::new(
+    "/usr/local/sbin/bypass-nic on",
+    "/usr/local/sbin/bypass-nic off",
+    Duration::from_secs(5),
+);
 ```
 
 ## TCP dataplane
@@ -184,19 +212,24 @@ state and the edge converges. See `docs/failure-model.md`,
 
 ## OTA / rollback
 
-Simulated A/B slots + journaled state machine
+A/B slots + journaled state machine
 (`Idle → Downloading → Verifying → Staged → RebootPending →
 BootingCandidate → HealthChecking → Committed`, with `RollbackPending →
-RolledBack` / `Failed`). SHA-256 + dev-HMAC verify; crash/power-loss
-recovery tested. Production swaps in real bootloader slots +
-Sigstore/cosign/TUF. See `docs/ota.md`.
+RolledBack` / `Failed`). SHA-256 + Ed25519 release-signature verify,
+journaled rollback protection (signed downgrades rejected), crash/power-loss
+recovery tested. Production maps slots to a real bootloader (`rauc` /
+`bootupd` / dm-verity) and keys to a KMS/HSM. See `docs/ota.md`.
 
 ## Security model
 
-rustls + mTLS, pinned CA, per-device identity, least-privilege containers,
-no committed secrets. Dev PKI via `scripts/gen-certs.sh`. Threat model
-(compromised edge, MITM, stolen cert, malicious update, replay, rollback,
-control-plane compromise) in `docs/security.md`.
+rustls + enforced mTLS (server requires device client certs, agent fails
+fast on half-TLS), pinned CA, per-device identity, Ed25519 OTA signatures,
+crash-safe registry snapshots, least-privilege containers (`USER 10001`,
+`cap_drop: ALL`, read-only FS, resource limits, healthchecks),
+`cargo audit` clean of vulnerabilities, no committed secrets. Dev PKI via
+`scripts/gen-certs.sh`. Threat model (compromised edge, MITM, stolen cert,
+malicious update, replay, rollback, control-plane compromise) in
+`docs/security.md`.
 
 ## Observability
 
@@ -207,14 +240,16 @@ version, OTA success/rollback. Scraped by `deploy/prometheus.yml`.
 ## Performance testing
 
 `storm` (T=0 thundering herd) + Criterion benches + flamegraph/perf notes.
-Measured numbers live in committed JSON; architectural expectations are
-labelled as such. See `docs/performance.md`.
+Measured locally (debug build, loopback, 200 clients × 10 × 1024 B):
+**2000 requests, 0 errors, 1887 conns/sec, 309 Mbps, p50 0.77 ms / p95
+47.7 ms / p99 82.5 ms** — full JSON in `benchmarks/storm-local.json`.
+Architectural expectations are labelled as such. See `docs/performance.md`.
 
 ## Failure injection
 
-`crates/e2e/tests/{partition,reconcile,failures}.rs` plus
+`crates/e2e/tests/{partition,reconcile,failures,mtls}.rs` plus
 `./scripts/failure-demo.sh` (outage, crash, corrupt config, invalid policy,
-bad OTA, duplicates, stale state).
+bad OTA, duplicates, stale state, mTLS rejection).
 
 ## Linux transparent proxy mode
 
@@ -241,11 +276,26 @@ cargo bench
 
 5-minute demo script: `docs/interview-demo.md`.
 
-## Known limitations
+## Production readiness
 
-Production-oriented reference, not production-ready: plaintext demo mode
-(mTLS opt-in), dev-HMAC update signatures (not Sigstore/TUF), simulated
-(not real) partition flips and bypass relay (`MockBypassController`),
-in-memory registry (no Postgres), no Docker daemon in this build env
-(compose files provided, daemon demo not executed here), perf numbers are
-local-only until you run `storm` on your hardware.
+What "production-ready" means here, and where it stands:
+
+- **Enforced mTLS** — done: mutual verification both directions, fail-fast
+  on misconfiguration, covered by `crates/e2e/tests/mtls.rs`. Remaining:
+  per-device enrollment/rotation via EST/SPIRE or cloud IoT PKI.
+- **Signed, rollback-protected OTA** — done: Ed25519 verify + journaled
+  downgrade rejection. Remaining: bootloader integration (`rauc`/`bootupd`),
+  KMS/HSM release keys, multi-signer quorum (Sigstore/TUF).
+- **Durable fleet state** — done: crash-safe registry snapshots
+  (`CONTROL_PERSIST_PATH`). Remaining: multi-replica control plane
+  (Raft/Postgres) for cloud-side HA.
+- **Fail-open hardware** — interface + `ExecBypassController` done and
+  tested; the relay itself is site hardware by definition
+  (`MockBypassController` stays for dev/test).
+- **Hardened deployment** — done: least-privilege users, dropped
+  capabilities, read-only FS, resource limits, healthchecks, persistent
+  volumes, `cargo audit` with zero vulnerabilities.
+- **Measured performance** — done: `benchmarks/storm-local.json` from a
+  real run (see above). Re-run on your hardware before quoting capacity;
+  no Docker daemon existed in this build env, so the Compose fleet is
+  provided but was exercised via binaries + integration tests instead.

@@ -22,9 +22,21 @@ cargo bench
 
 ## Measured vs expected
 
-- **Measured**: report only numbers you actually ran (commit the JSON).
-  Example local runs are in `benchmarks/` when present; CI does not assert
-  perf numbers.
+- **Measured** (`benchmarks/storm-local.json`, debug build, loopback,
+  Python echo upstream, 200 clients × 10 rounds × 1024 B):
+
+  | metric | value |
+  |---|---|
+  | total requests | 2000, errors 0 |
+  | elapsed | 0.106 s |
+  | connections/sec | 1887 |
+  | throughput | 309 Mbps |
+  | latency p50 / p95 / p99 | 0.77 ms / 47.7 ms / 82.5 ms |
+  | storm RSS | ~8 MB |
+
+  The p50/p99 spread is the thundering herd itself: all 200 clients connect
+  at T=0 and contend on loopback. CI does not assert perf numbers — re-run
+  `storm` on your hardware and commit the JSON before quoting capacity.
 - **Architectural expectations** (not promises): single Tokio task per
   connection with no per-connection heap buffering beyond kernel sockets
   scales to thousands of concurrent flows on modest hardware; the bound is

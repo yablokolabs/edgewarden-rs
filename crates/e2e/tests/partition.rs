@@ -122,6 +122,9 @@ async fn partition_proxy_survives_and_reconciles() {
             state_path: state_path.clone(),
             heartbeat_interval: Duration::from_secs(1),
             tls_ca: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_domain: None,
         },
         metrics,
     )
@@ -175,6 +178,9 @@ async fn partition_proxy_survives_and_reconciles() {
             state_path: state_path.clone(),
             heartbeat_interval: Duration::from_secs(1),
             tls_ca: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_domain: None,
         },
         metrics2,
     )

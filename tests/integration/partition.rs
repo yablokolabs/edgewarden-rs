@@ -122,6 +122,9 @@ async fn partition_proxy_survives_and_reconciles() {
             state_path: state_path.clone(),
             heartbeat_interval: Duration::from_secs(1),
             tls_ca: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_domain: None,
         },
         metrics,
     )
@@ -138,10 +141,16 @@ async fn partition_proxy_survives_and_reconciles() {
 
     // Sync must now fail, but with the agent keeping last-known-good.
     let sync_result = agent.sync_once(0).await;
-    assert!(sync_result.is_err(), "expected sync to fail while partitioned");
+    assert!(
+        sync_result.is_err(),
+        "expected sync to fail while partitioned"
+    );
 
     // --- 4. proxy STILL forwards on last-known-good ---
-    assert_eq!(proxy_roundtrip(proxy_addr, b"ping-during-outage").await, b"ping-during-outage");
+    assert_eq!(
+        proxy_roundtrip(proxy_addr, b"ping-during-outage").await,
+        b"ping-during-outage"
+    );
 
     // --- operator pushes a newer policy while partitioned (queued in registry clone) ---
     registry
@@ -169,6 +178,9 @@ async fn partition_proxy_survives_and_reconciles() {
             state_path: state_path.clone(),
             heartbeat_interval: Duration::from_secs(1),
             tls_ca: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_domain: None,
         },
         metrics2,
     )

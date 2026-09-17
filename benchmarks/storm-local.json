@@ -1,0 +1,14 @@
+{
+  "clients": 200,
+  "rounds": 10,
+  "payload_bytes": 1024,
+  "total_requests": 2000,
+  "errors": 0,
+  "elapsed_secs": 0.106005508,
+  "connections_per_sec": 1886.6944159165766,
+  "throughput_mbps": 309.11601310377193,
+  "latency_ms_p50": 0.767915,
+  "latency_ms_p95": 47.744451,
+  "latency_ms_p99": 82.487339,
+  "rss_bytes": 7974912
+}
