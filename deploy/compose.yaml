@@ -1,0 +1,85 @@
+name: edgewarden-demo
+services:
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/control-plane.Dockerfile
+    ports:
+      - "50051:50051"
+      - "8080:8080"
+    environment:
+      CONTROL_GRPC_ADDR: "0.0.0.0:50051"
+      CONTROL_HTTP_ADDR: "0.0.0.0:8080"
+      RUST_LOG: info
+
+  upstream:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/upstream.Dockerfile
+    expose:
+      - "18081"
+
+  edge-01:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/edge.Dockerfile
+    depends_on:
+      - control-plane
+      - upstream
+    ports:
+      - "18080:18080"
+      - "19091:19091"
+    environment:
+      EDGE_DEVICE_ID: edge-01
+      EDGE_CONTROL_PLANE: http://control-plane:50051
+      EDGE_LISTEN: 0.0.0.0:18080
+      EDGE_UPSTREAM: upstream:18081
+      EDGE_METRICS_ADDR: 0.0.0.0:19091
+      RUST_LOG: info
+
+  edge-02:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/edge.Dockerfile
+    depends_on:
+      - control-plane
+      - upstream
+    ports:
+      - "18082:18080"
+      - "19092:19091"
+    environment:
+      EDGE_DEVICE_ID: edge-02
+      EDGE_CONTROL_PLANE: http://control-plane:50051
+      EDGE_LISTEN: 0.0.0.0:18080
+      EDGE_UPSTREAM: upstream:18081
+      EDGE_METRICS_ADDR: 0.0.0.0:19091
+      RUST_LOG: info
+
+  edge-03:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/edge.Dockerfile
+    depends_on:
+      - control-plane
+      - upstream
+    ports:
+      - "18083:18080"
+      - "19093:19091"
+    environment:
+      EDGE_DEVICE_ID: edge-03
+      EDGE_CONTROL_PLANE: http://control-plane:50051
+      EDGE_LISTEN: 0.0.0.0:18080
+      EDGE_UPSTREAM: upstream:18081
+      EDGE_METRICS_ADDR: 0.0.0.0:19091
+      RUST_LOG: info
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - edge-01
+      - edge-02
+      - edge-03
