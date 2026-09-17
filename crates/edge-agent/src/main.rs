@@ -28,8 +28,10 @@ struct Args {
     state_path: PathBuf,
     #[arg(long, env = "EDGE_LISTEN", default_value = "127.0.0.1:18080")]
     listen: SocketAddr,
+    /// Static upstream as `IP:port` or DNS `host:port` (resolved at
+    /// startup). Policy-pushed upstreams accept the same forms.
     #[arg(long, env = "EDGE_UPSTREAM", default_value = "127.0.0.1:18081")]
-    upstream: SocketAddr,
+    upstream: String,
     #[arg(long, env = "EDGE_METRICS_ADDR", default_value = "127.0.0.1:19091")]
     metrics_addr: SocketAddr,
     #[arg(long, env = "EDGE_TLS_CA")]
@@ -71,13 +73,23 @@ async fn main() -> anyhow::Result<()> {
     let last_good = probe.last_good_policy();
     drop(probe);
 
+    let static_upstream = resolve_upstream(&args.upstream)
+        .await
+        .with_context(|| format!("resolving upstream {}", args.upstream))?;
+    let policy_upstream = if last_good.default_upstream.is_empty() {
+        None
+    } else {
+        match resolve_upstream(&last_good.default_upstream).await {
+            Ok(a) => Some(a),
+            Err(e) => {
+                tracing::warn!(error = %e, "ignoring unresolvable policy upstream, using static");
+                None
+            }
+        }
+    };
     let proxy_cfg = edge_proxy::ProxyConfig {
         listen_addr: args.listen,
-        upstream_addr: if last_good.default_upstream.is_empty() {
-            args.upstream
-        } else {
-            last_good.default_upstream.parse().unwrap_or(args.upstream)
-        },
+        upstream_addr: policy_upstream.unwrap_or(static_upstream),
         max_connections: last_good.max_connections as usize,
         connect_timeout_secs: 5,
         idle_timeout_secs: last_good.idle_timeout_secs,
@@ -114,4 +126,19 @@ async fn main() -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_secs(1)).await;
     proxy_handle.abort();
     Ok(())
+}
+
+/// Resolve `IP:port` or DNS `host:port` to a socket address (first result).
+async fn resolve_upstream(spec: &str) -> anyhow::Result<SocketAddr> {
+    if let Ok(addr) = spec.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    let mut addrs = tokio::net::lookup_host(spec)
+        .await
+        .with_context(|| format!("DNS lookup for upstream {spec}"))?;
+    let addr = addrs
+        .next()
+        .with_context(|| format!("DNS for upstream {spec} returned no addresses"))?;
+    tracing::info!(%spec, %addr, "resolved upstream");
+    Ok(addr)
 }

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.78-slim AS build
+FROM rust:1.89-slim AS build
 RUN apt-get update && apt-get install -y protobuf-compiler pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /work
 COPY Cargo.toml Cargo.lock* ./

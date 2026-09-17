@@ -2,7 +2,7 @@ name: edgewarden-demo
 services:
   control-plane:
     build:
-      context: ../..
+      context: ..
       dockerfile: deploy/docker/control-plane.Dockerfile
     ports:
       - "50051:50051"
@@ -38,7 +38,7 @@ services:
 
   upstream:
     build:
-      context: ../..
+      context: ..
       dockerfile: deploy/docker/upstream.Dockerfile
     expose:
       - "18081"
@@ -56,7 +56,7 @@ services:
 
   edge-01:
     build:
-      context: ../..
+      context: ..
       dockerfile: deploy/docker/edge.Dockerfile
     depends_on:
       control-plane:
@@ -94,7 +94,7 @@ services:
 
   edge-02:
     build:
-      context: ../..
+      context: ..
       dockerfile: deploy/docker/edge.Dockerfile
     depends_on:
       control-plane:
@@ -132,7 +132,7 @@ services:
 
   edge-03:
     build:
-      context: ../..
+      context: ..
       dockerfile: deploy/docker/edge.Dockerfile
     depends_on:
       control-plane:

@@ -12,8 +12,10 @@ use tracing::info;
 struct Args {
     #[arg(long, env = "EDGE_LISTEN", default_value = "127.0.0.1:18080")]
     listen: SocketAddr,
+    /// Upstream as `IP:port` or DNS `host:port` (resolved once at startup;
+    /// container/K8s service names work here).
     #[arg(long, env = "EDGE_UPSTREAM", default_value = "127.0.0.1:18081")]
-    upstream: SocketAddr,
+    upstream: String,
     #[arg(long, env = "EDGE_MAX_CONN", default_value_t = 512)]
     max_connections: usize,
     #[arg(long, env = "EDGE_CONNECT_TIMEOUT_SECS", default_value_t = 5)]
@@ -32,9 +34,12 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    let upstream = resolve_upstream(&args.upstream)
+        .await
+        .with_context(|| format!("resolving upstream {}", args.upstream))?;
     let config = ProxyConfig {
         listen_addr: args.listen,
-        upstream_addr: args.upstream,
+        upstream_addr: upstream,
         max_connections: args.max_connections,
         connect_timeout_secs: args.connect_timeout_secs,
         idle_timeout_secs: args.idle_timeout_secs,
@@ -88,4 +93,19 @@ async fn main() -> anyhow::Result<()> {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     info!("shutdown complete");
     Ok(())
+}
+
+/// Resolve `IP:port` or DNS `host:port` to a socket address (first result).
+/// DNS is resolved once at startup and logged, so operators can see exactly
+/// which backend the dataplane pinned.
+pub async fn resolve_upstream(spec: &str) -> anyhow::Result<SocketAddr> {
+    if let Ok(addr) = spec.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    let mut addrs = tokio::net::lookup_host(spec)
+        .await
+        .with_context(|| format!("DNS lookup for upstream {spec}"))?;
+    addrs
+        .next()
+        .with_context(|| format!("DNS for upstream {spec} returned no addresses"))
 }
