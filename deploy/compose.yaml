@@ -10,7 +10,31 @@ services:
     environment:
       CONTROL_GRPC_ADDR: "0.0.0.0:50051"
       CONTROL_HTTP_ADDR: "0.0.0.0:8080"
+      CONTROL_PERSIST_PATH: /var/lib/edgewarden/registry.json
       RUST_LOG: info
+    volumes:
+      - control-data:/var/lib/edgewarden
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1G
+        reservations:
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/readyz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
   upstream:
     build:
@@ -18,14 +42,27 @@ services:
       dockerfile: deploy/docker/upstream.Dockerfile
     expose:
       - "18081"
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 256M
 
   edge-01:
     build:
       context: ../..
       dockerfile: deploy/docker/edge.Dockerfile
     depends_on:
-      - control-plane
-      - upstream
+      control-plane:
+        condition: service_healthy
+      upstream:
+        condition: service_started
     ports:
       - "18080:18080"
       - "19091:19091"
@@ -35,15 +72,35 @@ services:
       EDGE_LISTEN: 0.0.0.0:18080
       EDGE_UPSTREAM: upstream:18081
       EDGE_METRICS_ADDR: 0.0.0.0:19091
+      EDGE_STATE_PATH: /var/lib/edgewarden/edge-state.json
       RUST_LOG: info
+    volumes:
+      - edge-01-data:/var/lib/edgewarden
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+        reservations:
+          memory: 64M
 
   edge-02:
     build:
       context: ../..
       dockerfile: deploy/docker/edge.Dockerfile
     depends_on:
-      - control-plane
-      - upstream
+      control-plane:
+        condition: service_healthy
+      upstream:
+        condition: service_started
     ports:
       - "18082:18080"
       - "19092:19091"
@@ -53,15 +110,35 @@ services:
       EDGE_LISTEN: 0.0.0.0:18080
       EDGE_UPSTREAM: upstream:18081
       EDGE_METRICS_ADDR: 0.0.0.0:19091
+      EDGE_STATE_PATH: /var/lib/edgewarden/edge-state.json
       RUST_LOG: info
+    volumes:
+      - edge-02-data:/var/lib/edgewarden
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+        reservations:
+          memory: 64M
 
   edge-03:
     build:
       context: ../..
       dockerfile: deploy/docker/edge.Dockerfile
     depends_on:
-      - control-plane
-      - upstream
+      control-plane:
+        condition: service_healthy
+      upstream:
+        condition: service_started
     ports:
       - "18083:18080"
       - "19093:19091"
@@ -71,7 +148,25 @@ services:
       EDGE_LISTEN: 0.0.0.0:18080
       EDGE_UPSTREAM: upstream:18081
       EDGE_METRICS_ADDR: 0.0.0.0:19091
+      EDGE_STATE_PATH: /var/lib/edgewarden/edge-state.json
       RUST_LOG: info
+    volumes:
+      - edge-03-data:/var/lib/edgewarden
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512M
+        reservations:
+          memory: 64M
 
   prometheus:
     image: prom/prometheus:v2.53.0
@@ -83,3 +178,10 @@ services:
       - edge-01
       - edge-02
       - edge-03
+    restart: unless-stopped
+
+volumes:
+  control-data:
+  edge-01-data:
+  edge-02-data:
+  edge-03-data:
