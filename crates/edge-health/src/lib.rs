@@ -72,6 +72,87 @@ impl BypassController for MockBypassController {
     }
 }
 
+/// Production bypass controller that shells out to site-specific hardware
+/// commands (bypass NIC vendor CLI, GPIO relay script, `ipmitool`, ...).
+///
+/// The commands run with a timeout and their exit status gates the cached
+/// state: a failed command returns an error and leaves state unchanged, so
+/// the supervisor retries on the next evaluation instead of assuming the
+/// relay moved. Example:
+///
+/// ```ignore
+/// let bypass = ExecBypassController::new(
+///     "/usr/local/sbin/bypass-nic on",
+///     "/usr/local/sbin/bypass-nic off",
+///     Duration::from_secs(5),
+/// );
+/// ```
+#[derive(Debug)]
+pub struct ExecBypassController {
+    enable_cmd: String,
+    disable_cmd: String,
+    timeout: Duration,
+    enabled: AtomicBool,
+}
+
+impl ExecBypassController {
+    pub fn new(
+        enable_cmd: impl Into<String>,
+        disable_cmd: impl Into<String>,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            enable_cmd: enable_cmd.into(),
+            disable_cmd: disable_cmd.into(),
+            timeout,
+            enabled: AtomicBool::new(false),
+        }
+    }
+
+    async fn run(&self, cmd: &str, action: &str) -> Result<(), HealthError> {
+        let output = tokio::time::timeout(
+            self.timeout,
+            tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .output(),
+        )
+        .await
+        .map_err(|_| HealthError::Bypass(format!("{action} command timed out")))?
+        .map_err(|e| HealthError::Bypass(format!("{action} spawn failed: {e}")))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(HealthError::Bypass(format!(
+                "{action} exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl BypassController for ExecBypassController {
+    async fn enable_bypass(&self) -> Result<(), HealthError> {
+        let cmd = self.enable_cmd.clone();
+        self.run(&cmd, "enable-bypass").await?;
+        self.enabled.store(true, Ordering::SeqCst);
+        tracing::warn!("hardware bypass ENABLED");
+        Ok(())
+    }
+    async fn disable_bypass(&self) -> Result<(), HealthError> {
+        let cmd = self.disable_cmd.clone();
+        self.run(&cmd, "disable-bypass").await?;
+        self.enabled.store(false, Ordering::SeqCst);
+        tracing::info!("hardware bypass disabled");
+        Ok(())
+    }
+    fn bypass_enabled(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst)
+    }
+}
+
 /// Point-in-time resource snapshot read from `/proc` (Linux) with graceful
 /// fallback elsewhere.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -312,6 +393,23 @@ mod tests {
         b.enable_bypass().await.unwrap();
         assert!(b.bypass_enabled());
         b.disable_bypass().await.unwrap();
+        assert!(!b.bypass_enabled());
+    }
+
+    #[tokio::test]
+    async fn exec_bypass_runs_commands_and_gates_state() {
+        let b = ExecBypassController::new("true", "true", Duration::from_secs(5));
+        assert!(!b.bypass_enabled());
+        b.enable_bypass().await.unwrap();
+        assert!(b.bypass_enabled());
+        b.disable_bypass().await.unwrap();
+        assert!(!b.bypass_enabled());
+    }
+
+    #[tokio::test]
+    async fn exec_bypass_failure_leaves_state_unchanged() {
+        let b = ExecBypassController::new("false", "true", Duration::from_secs(5));
+        assert!(b.enable_bypass().await.is_err());
         assert!(!b.bypass_enabled());
     }
 

@@ -1,12 +1,20 @@
-//! In-memory device registry with desired-state tracking.
+//! Device registry with desired-state tracking and crash-safe persistence.
+//!
+//! Membership and desired state are snapshotted to disk (atomic rename) on
+//! every change so a control-plane restart neither loses the fleet roster
+//! nor resets the rollout sequence. Ephemeral per-heartbeat fields
+//! (`last_seen_secs`, cpu/mem) are intentionally *not* persisted on every
+//! heartbeat — they refresh on the next edge check-in after a restart.
 
 use edge_protocol::fleet::Policy;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceRecord {
     pub device_id: String,
     pub hardware_id: String,
@@ -43,6 +51,44 @@ struct Inner {
     policy: Option<Policy>,
     policy_seq: u64,
     desired_software: String,
+    persist_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicySnapshot {
+    version: u64,
+    max_connections: u32,
+    idle_timeout_secs: u64,
+    default_upstream: String,
+    rules_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RegistrySnapshot {
+    devices: Vec<DeviceRecord>,
+    policy: Option<PolicySnapshot>,
+    policy_seq: u64,
+    desired_software: String,
+}
+
+fn policy_to_snapshot(p: &Policy) -> PolicySnapshot {
+    PolicySnapshot {
+        version: p.version,
+        max_connections: p.max_connections,
+        idle_timeout_secs: p.idle_timeout_secs,
+        default_upstream: p.default_upstream.clone(),
+        rules_json: p.rules_json.clone(),
+    }
+}
+
+fn policy_from_snapshot(s: &PolicySnapshot) -> Policy {
+    Policy {
+        version: s.version,
+        max_connections: s.max_connections,
+        idle_timeout_secs: s.idle_timeout_secs,
+        default_upstream: s.default_upstream.clone(),
+        rules_json: s.rules_json.clone(),
+    }
 }
 
 /// Heartbeat fields from the edge. Grouped to keep the API stable.
@@ -68,6 +114,83 @@ pub struct Registry {
 impl Registry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Load a previously persisted registry, falling back to empty when the
+    /// file is absent. A corrupt file is a hard error — the operator must
+    /// intervene rather than silently dropping the fleet roster.
+    pub async fn load(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        if !path.exists() {
+            let r = Self::default();
+            r.set_persist_path(path).await;
+            return Ok(r);
+        }
+        let bytes = tokio::fs::read(&path).await?;
+        let snap: RegistrySnapshot = serde_json::from_slice(&bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let mut inner = Inner {
+            devices: snap
+                .devices
+                .into_iter()
+                .map(|d| (d.device_id.clone(), d))
+                .collect(),
+            policy: snap.policy.as_ref().map(policy_from_snapshot),
+            policy_seq: snap.policy_seq,
+            desired_software: snap.desired_software,
+            persist_path: Some(path),
+        };
+        // Ephemeral liveness ages out: a restart must not present stale
+        // devices as fresh. Reset last_seen to zero so age reads large until
+        // each edge heartbeats again.
+        for d in inner.devices.values_mut() {
+            d.last_seen_secs = 0;
+        }
+        Ok(Self {
+            inner: Arc::new(RwLock::new(inner)),
+        })
+    }
+
+    /// Enable persistence for a registry created with [`Registry::new`].
+    pub async fn set_persist_path(&self, path: PathBuf) {
+        self.inner.write().await.persist_path = Some(path);
+    }
+
+    fn snapshot_locked(inner: &Inner) -> RegistrySnapshot {
+        RegistrySnapshot {
+            devices: inner.devices.values().cloned().collect(),
+            policy: inner.policy.as_ref().map(policy_to_snapshot),
+            policy_seq: inner.policy_seq,
+            desired_software: inner.desired_software.clone(),
+        }
+    }
+
+    async fn write_snapshot(path: PathBuf, snap: &RegistrySnapshot) {
+        let tmp = path.with_extension("tmp");
+        let write = async {
+            let bytes = serde_json::to_vec_pretty(snap)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            tokio::fs::write(&tmp, bytes).await?;
+            tokio::fs::rename(&tmp, &path).await
+        };
+        if let Err(e) = write.await {
+            // Never fail the mutation for a snapshot error; retry on the
+            // next change and surface via logs + metrics instead.
+            tracing::warn!(error = %e, path = %path.display(), "registry snapshot failed");
+        }
+    }
+
+    /// Persist the current snapshot if a path is configured. Called after
+    /// membership/desired-state mutations (not heartbeats).
+    async fn maybe_persist(&self) {
+        let (path, snap) = {
+            let inner = self.inner.read().await;
+            match &inner.persist_path {
+                Some(p) => (p.clone(), Self::snapshot_locked(&inner)),
+                None => return,
+            }
+        };
+        Self::write_snapshot(path, &snap).await;
     }
 
     pub async fn register(
@@ -98,6 +221,8 @@ impl Registry {
             active_connections: 0,
         };
         inner.devices.insert(device_id, rec.clone());
+        drop(inner);
+        self.maybe_persist().await;
         rec
     }
 
@@ -157,25 +282,33 @@ impl Registry {
     }
 
     /// Operator pushes a new desired policy. Monotonic seq; idempotent on
-    /// identical version (no seq bump, no duplicate rollout).
+    /// identical version (no seq bump, no duplicate rollout, no rewrite).
     pub async fn set_policy(&self, policy: Policy) -> u64 {
-        let mut inner = self.inner.write().await;
-        if inner.policy.as_ref().map(|p| p.version) == Some(policy.version) {
-            return inner.policy_seq;
-        }
-        inner.policy_seq += 1;
-        inner.policy = Some(policy);
-        inner.policy_seq
+        let seq = {
+            let mut inner = self.inner.write().await;
+            if inner.policy.as_ref().map(|p| p.version) == Some(policy.version) {
+                return inner.policy_seq;
+            }
+            inner.policy_seq += 1;
+            inner.policy = Some(policy);
+            inner.policy_seq
+        };
+        self.maybe_persist().await;
+        seq
     }
 
     pub async fn set_desired_software(&self, version: String) -> u64 {
-        let mut inner = self.inner.write().await;
-        if inner.desired_software == version {
-            return inner.policy_seq;
-        }
-        inner.policy_seq += 1;
-        inner.desired_software = version;
-        inner.policy_seq
+        let seq = {
+            let mut inner = self.inner.write().await;
+            if inner.desired_software == version {
+                return inner.policy_seq;
+            }
+            inner.policy_seq += 1;
+            inner.desired_software = version;
+            inner.policy_seq
+        };
+        self.maybe_persist().await;
+        seq
     }
 
     pub async fn current_policy(&self) -> (Option<Policy>, u64) {
@@ -239,5 +372,49 @@ mod tests {
         let s1 = r.set_policy(p.clone()).await;
         let s2 = r.set_policy(p).await;
         assert_eq!(s1, s2);
+    }
+
+    #[tokio::test]
+    async fn registry_survives_restart_via_snapshot() {
+        let dir = std::env::temp_dir().join(format!(
+            "edgewarden-registry-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("registry.json");
+        {
+            let r = Registry::load(&path).await.unwrap();
+            r.set_policy(Policy {
+                version: 9,
+                max_connections: 64,
+                idle_timeout_secs: 30,
+                default_upstream: "127.0.0.1:9".into(),
+                rules_json: "{}".into(),
+            })
+            .await;
+            r.register(
+                "edge-01".into(),
+                "hw".into(),
+                "0.1.0".into(),
+                "0".into(),
+                "0.1.0".into(),
+            )
+            .await;
+            assert!(path.exists());
+        }
+        // Simulate a control-plane restart: roster + desired state reload,
+        // liveness ages out until edges check in again.
+        let r2 = Registry::load(&path).await.unwrap();
+        let devs = r2.devices().await;
+        assert_eq!(devs.len(), 1);
+        assert_eq!(devs[0].device_id, "edge-01");
+        assert!(devs[0].last_seen_age_secs() > 0);
+        let (policy, seq) = r2.current_policy().await;
+        assert_eq!(policy.map(|p| p.version), Some(9));
+        assert!(seq >= 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
