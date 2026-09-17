@@ -19,12 +19,25 @@ struct Args {
     grpc_addr: SocketAddr,
     #[arg(long, env = "CONTROL_HTTP_ADDR", default_value = "0.0.0.0:8080")]
     http_addr: SocketAddr,
-    // mTLS is supported via tonic TLS config; for the local demo these are
-    // optional and plaintext is used with a warning. See docs/security.md.
+    /// Server certificate + key for gRPC TLS. Production deployments must
+    /// set these together with `tls_client_ca` (full mTLS). When absent,
+    /// the server runs plaintext and logs a warning — local demo only.
+    /// See docs/security.md.
     #[arg(long, env = "CONTROL_TLS_CERT")]
     tls_cert: Option<String>,
     #[arg(long, env = "CONTROL_TLS_KEY")]
     tls_key: Option<String>,
+    /// CA certificate used to verify edge device client certificates.
+    /// REQUIRED whenever `tls_cert`/`tls_key` are set: the server refuses
+    /// to start with one-way TLS so a misconfigured pilot cannot silently
+    /// run without device authentication.
+    #[arg(long, env = "CONTROL_TLS_CLIENT_CA")]
+    tls_client_ca: Option<String>,
+    /// Path for the crash-safe registry snapshot (created if absent).
+    /// Without it the registry is memory-only and fleet state is lost on
+    /// restart — not production-acceptable.
+    #[arg(long, env = "CONTROL_PERSIST_PATH")]
+    persist_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,22 +119,51 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
-    let registry = Registry::new();
+    let registry = match &args.persist_path {
+        Some(p) => Registry::load(p).await.context("load registry snapshot")?,
+        None => {
+            tracing::warn!(
+                "no CONTROL_PERSIST_PATH set: registry is memory-only and fleet state will be lost on restart"
+            );
+            Registry::new()
+        }
+    };
     let svc = FleetServiceImpl::new(registry.clone());
 
     let grpc_addr = args.grpc_addr;
+    let tls_cert = args.tls_cert.clone();
+    let tls_key = args.tls_key.clone();
+    let tls_client_ca = args.tls_client_ca.clone();
     let grpc = tokio::spawn(async move {
         let mut builder = tonic::transport::Server::builder();
-        // mTLS: if cert+key are provided, terminate TLS here. Client CA
-        // verification should be added for full mTLS in production.
-        if let (Some(cert), Some(key)) = (args_tls_cert(), args_tls_key()) {
-            let cert = std::fs::read(&cert)?;
-            let key = std::fs::read(&key)?;
-            let identity = tonic::transport::Identity::from_pem(cert, key);
-            builder =
-                builder.tls_config(tonic::transport::ServerTlsConfig::new().identity(identity))?;
-        } else {
-            tracing::warn!("starting gRPC WITHOUT TLS (dev/demo mode); use CONTROL_TLS_* for mTLS");
+        match (tls_cert, tls_key, tls_client_ca) {
+            (Some(cert_path), Some(key_path), Some(ca_path)) => {
+                let cert = std::fs::read(&cert_path)?;
+                let key = std::fs::read(&key_path)?;
+                let ca = std::fs::read(&ca_path)?;
+                let identity = tonic::transport::Identity::from_pem(cert, key);
+                let client_ca = tonic::transport::Certificate::from_pem(ca);
+                builder = builder.tls_config(
+                    tonic::transport::ServerTlsConfig::new()
+                        .identity(identity)
+                        .client_ca_root(client_ca),
+                )?;
+                tracing::info!("gRPC mTLS enabled (device client certs required)");
+            }
+            (Some(_), Some(_), None) => {
+                anyhow::bail!(
+                    "CONTROL_TLS_CLIENT_CA is required with CONTROL_TLS_CERT/KEY: \
+                     refusing one-way TLS without device authentication"
+                );
+            }
+            (None, None, _) => {
+                tracing::warn!(
+                    "starting gRPC WITHOUT TLS (local demo only); set CONTROL_TLS_* for mTLS"
+                );
+            }
+            _ => {
+                anyhow::bail!("set both CONTROL_TLS_CERT and CONTROL_TLS_KEY, or neither");
+            }
         }
         builder
             .add_service(FleetServiceServer::new(svc))
@@ -135,6 +177,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/devices", get(list_devices))
         .route("/policy", post(push_policy))
         .route("/healthz", get(|| async { "ok" }))
+        .route(
+            "/readyz",
+            get(|State(s): State<HttpState>| async move {
+                // Ready when the registry is reachable; extend with fleet
+                // quorum checks as needed.
+                let _ = s.registry.devices().await;
+                "ready"
+            }),
+        )
         .with_state(http_state);
     let listener = tokio::net::TcpListener::bind(args.http_addr)
         .await
@@ -146,11 +197,4 @@ async fn main() -> anyhow::Result<()> {
     g??;
     h??;
     Ok(())
-}
-
-fn args_tls_cert() -> Option<String> {
-    std::env::var("CONTROL_TLS_CERT").ok()
-}
-fn args_tls_key() -> Option<String> {
-    std::env::var("CONTROL_TLS_KEY").ok()
 }

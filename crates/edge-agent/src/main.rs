@@ -34,6 +34,10 @@ struct Args {
     metrics_addr: SocketAddr,
     #[arg(long, env = "EDGE_TLS_CA")]
     tls_ca: Option<String>,
+    #[arg(long, env = "EDGE_TLS_CERT")]
+    tls_cert: Option<String>,
+    #[arg(long, env = "EDGE_TLS_KEY")]
+    tls_key: Option<String>,
 }
 
 #[tokio::main]
@@ -59,6 +63,9 @@ async fn main() -> anyhow::Result<()> {
         state_path: args.state_path.clone(),
         heartbeat_interval: Duration::from_secs(5),
         tls_ca: args.tls_ca.clone(),
+        tls_cert: args.tls_cert.clone(),
+        tls_key: args.tls_key.clone(),
+        tls_domain: None,
     };
     let probe = EdgeAgent::new(agent_cfg.clone(), metrics.clone()).context("open state store")?;
     let last_good = probe.last_good_policy();

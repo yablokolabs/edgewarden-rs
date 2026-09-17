@@ -9,6 +9,7 @@ tokio = { workspace = true }
 tonic = { workspace = true }
 tokio-stream = { workspace = true }
 serde_json = { workspace = true }
+rcgen = { workspace = true }
 edge-protocol = { path = "../edge-protocol" }
 edge-state = { path = "../edge-state" }
 edge-proxy = { path = "../edge-proxy" }

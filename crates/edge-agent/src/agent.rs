@@ -30,7 +30,14 @@ pub struct AgentConfig {
     pub control_plane: String,
     pub state_path: PathBuf,
     pub heartbeat_interval: Duration,
+    /// Pinned CA used to verify the control plane. When set, the agent
+    /// requires `tls_cert`/`tls_key` as well and presents its device
+    /// client certificate (full mTLS). Plaintext is local-demo only.
     pub tls_ca: Option<String>,
+    pub tls_cert: Option<String>,
+    pub tls_key: Option<String>,
+    /// Override the TLS domain name (tests use "localhost").
+    pub tls_domain: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -43,6 +50,9 @@ impl Default for AgentConfig {
             state_path: PathBuf::from("edge-state.json"),
             heartbeat_interval: Duration::from_secs(5),
             tls_ca: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_domain: None,
         }
     }
 }
@@ -78,27 +88,52 @@ impl EdgeAgent {
     }
 
     async fn connect(&self) -> Result<FleetServiceClient<Channel>, AgentError> {
-        // mTLS: when `tls_ca` is set we use rustls with the pinned CA;
-        // otherwise plaintext (dev/demo). Device client certs are loaded
-        // the same way in production builds (see docs/security.md).
-        if let Some(ca) = &self.config.tls_ca {
-            let pem = std::fs::read(ca).map_err(|e| AgentError::State(e.to_string()))?;
-            let ca_cert = tonic::transport::Certificate::from_pem(pem);
-            let tls = tonic::transport::ClientTlsConfig::new()
-                .ca_certificate(ca_cert)
-                .domain_name("localhost");
-            let channel = Channel::from_shared(self.config.control_plane.clone())
-                .map_err(|e| AgentError::State(e.to_string()))?
-                .tls_config(tls)?
-                .connect()
-                .await?;
-            Ok(FleetServiceClient::new(channel))
-        } else {
-            let channel = Channel::from_shared(self.config.control_plane.clone())
-                .map_err(|e| AgentError::State(e.to_string()))?
-                .connect()
-                .await?;
-            Ok(FleetServiceClient::new(channel))
+        // Full mTLS when `tls_ca` is set: pinned CA verifies the server and
+        // the device client certificate authenticates the edge. A CA without
+        // a device identity is a hard error — fail fast instead of running
+        // half-authenticated. Plaintext otherwise (local demo only).
+        match (
+            &self.config.tls_ca,
+            &self.config.tls_cert,
+            &self.config.tls_key,
+        ) {
+            (Some(ca_path), Some(cert_path), Some(key_path)) => {
+                let ca_pem =
+                    std::fs::read(ca_path).map_err(|e| AgentError::State(e.to_string()))?;
+                let cert_pem =
+                    std::fs::read(cert_path).map_err(|e| AgentError::State(e.to_string()))?;
+                let key_pem =
+                    std::fs::read(key_path).map_err(|e| AgentError::State(e.to_string()))?;
+                let domain = self
+                    .config
+                    .tls_domain
+                    .clone()
+                    .unwrap_or_else(|| "localhost".to_string());
+                let tls = tonic::transport::ClientTlsConfig::new()
+                    .ca_certificate(tonic::transport::Certificate::from_pem(ca_pem))
+                    .identity(tonic::transport::Identity::from_pem(cert_pem, key_pem))
+                    .domain_name(domain);
+                let channel = Channel::from_shared(self.config.control_plane.clone())
+                    .map_err(|e| AgentError::State(e.to_string()))?
+                    .tls_config(tls)?
+                    .connect()
+                    .await?;
+                Ok(FleetServiceClient::new(channel))
+            }
+            (Some(_), _, _) => Err(AgentError::State(
+                "EDGE_TLS_CA requires EDGE_TLS_CERT and EDGE_TLS_KEY (device identity)".into(),
+            )),
+            (None, None, None) => {
+                tracing::warn!("control-plane link is plaintext (local demo only)");
+                let channel = Channel::from_shared(self.config.control_plane.clone())
+                    .map_err(|e| AgentError::State(e.to_string()))?
+                    .connect()
+                    .await?;
+                Ok(FleetServiceClient::new(channel))
+            }
+            _ => Err(AgentError::State(
+                "set EDGE_TLS_CA/CERT/KEY together, or none (plaintext demo)".into(),
+            )),
         }
     }
 
