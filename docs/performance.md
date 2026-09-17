@@ -37,6 +37,16 @@ cargo bench
   The p50/p99 spread is the thundering herd itself: all 200 clients connect
   at T=0 and contend on loopback. CI does not assert perf numbers — re-run
   `storm` on your hardware and commit the JSON before quoting capacity.
+
+- **Measured through the Docker fleet** (release proxy in container,
+  host-run `storm`, 100 clients × 5 rounds × 256 B, control plane stopped
+  mid-run to prove partition behavior): **500 requests, 0 errors,
+  2605 conns/sec, 53 Mbps, p50 2.0 ms / p95 22.1 ms / p99 24.1 ms**,
+  `edge_control_plane_connected 0`, `edge_proxy_errors_total 0` during the
+  outage. Full Compose evidence (register → policy 42 → echo on all three
+  edges → kill cloud → storm → restore → policy 43 → all reported=43,
+  Prometheus `up` on all edges) is the documented demo path in
+  `docs/interview-demo.md`.
 - **Architectural expectations** (not promises): single Tokio task per
   connection with no per-connection heap buffering beyond kernel sockets
   scales to thousands of concurrent flows on modest hardware; the bound is

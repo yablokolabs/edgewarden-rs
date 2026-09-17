@@ -296,6 +296,11 @@ What "production-ready" means here, and where it stands:
   capabilities, read-only FS, resource limits, healthchecks, persistent
   volumes, `cargo audit` with zero vulnerabilities.
 - **Measured performance** — done: `benchmarks/storm-local.json` from a
-  real run (see above). Re-run on your hardware before quoting capacity;
-  no Docker daemon existed in this build env, so the Compose fleet is
-  provided but was exercised via binaries + integration tests instead.
+  real run (see above), plus a Docker-fleet run (500 reqs, 0 errors during
+  a control-plane outage). Re-run on your hardware before quoting capacity.
+- **Docker Compose demo** — done and executed: 3 edges registered, policy
+  42 reconciled fleet-wide, echo verified on all proxies, cloud killed
+  (forwarding + storm clean), cloud restored with registry persistence
+  (seq continued), policy 43 reconciled, Prometheus `up` on all edges.
+  Note: this host already runs an app on :8080, so run the demo with the
+  control-plane REST on :8081 (override file or `ports` tweak).
