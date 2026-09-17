@@ -3,6 +3,8 @@ name = "edge-ota"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+description = "Persistent A/B OTA update state machine with Ed25519 verification and rollback protection"
+repository = "https://github.com/yablokolabs/edgewarden-rs"
 
 [dependencies]
 serde = { workspace = true }

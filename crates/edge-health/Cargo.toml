@@ -3,6 +3,8 @@ name = "edge-health"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+description = "Health supervision, watchdogs, and fail-open bypass control for edge appliances"
+repository = "https://github.com/yablokolabs/edgewarden-rs"
 
 [dependencies]
 tokio = { workspace = true }

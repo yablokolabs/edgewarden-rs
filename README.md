@@ -1,5 +1,14 @@
 # EdgeWarden
 
+[![CI](https://github.com/yablokolabs/edgewarden-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/yablokolabs/edgewarden-rs/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/yablokolabs/edgewarden-rs)](https://github.com/yablokolabs/edgewarden-rs/releases)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
+[![edge-state](https://img.shields.io/crates/v/edge-state)](https://crates.io/crates/edge-state)
+[![edge-ota](https://img.shields.io/crates/v/edge-ota)](https://crates.io/crates/edge-ota)
+[![edge-health](https://img.shields.io/crates/v/edge-health)](https://crates.io/crates/edge-health)
+[![edge-telemetry](https://img.shields.io/crates/v/edge-telemetry)](https://crates.io/crates/edge-telemetry)
+[![edge-protocol](https://img.shields.io/crates/v/edge-protocol)](https://crates.io/crates/edge-protocol)
+
 Cloud-managed Rust edge proxy appliance reference architecture.
 
 ![EdgeWarden architecture](docs/assets/edgewarden-architecture.svg)
