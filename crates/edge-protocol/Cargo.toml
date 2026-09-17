@@ -1,0 +1,16 @@
+[package]
+name = "edge-protocol"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+tonic = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }

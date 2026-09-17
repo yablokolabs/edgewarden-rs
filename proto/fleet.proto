@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+package edgewarden.fleet.v1;
+
+// FleetService is hosted by the cloud control plane. The edge appliance
+// always dials out; the cloud never opens inbound connections into
+// customer networks. `Watch` is a long-lived bidirectional stream over
+// which the edge reports state and receives desired-state commands.
+service FleetService {
+  // One-shot registration. Returns the current desired state snapshot.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  // Periodic unary heartbeat. Used as a fallback / reconciliation path
+  // when streaming is unavailable and as the primary path in constrained
+  // environments. Returns desired state.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  // Persistent bidirectional stream. Edge sends EdgeReport messages,
+  // cloud replies with CloudCommand messages. Either side may close on
+  // error; the edge must reconnect with jittered exponential backoff.
+  rpc Watch(stream EdgeReport) returns (stream CloudCommand);
+  // Fire-and-forget telemetry upload (at-least-once, idempotent).
+  rpc ReportTelemetry(TelemetryReport) returns (TelemetryAck);
+}
+
+enum HealthState {
+  HEALTH_UNKNOWN = 0;
+  HEALTHY = 1;
+  DEGRADED = 2;
+  UNHEALTHY = 3;
+}
+
+message DeviceIdentity {
+  string device_id = 1;
+  string hardware_id = 2;
+  string software_version = 3;
+}
+
+message ResourceUsage {
+  double cpu_usage = 1;    // 0.0 - 1.0
+  uint64 memory_bytes = 2;
+  uint64 active_connections = 3;
+  uint64 uptime_secs = 4;
+}
+
+// Policy enforced locally by the edge dataplane. The dataplane must keep
+// operating on last-known-good policy when the control plane is gone.
+message Policy {
+  uint64 version = 1;
+  uint32 max_connections = 2;
+  uint64 idle_timeout_secs = 3;
+  // Default upstream used by the demo proxy (host:port).
+  string default_upstream = 4;
+  // Opaque JSON rules for future extension; edge must ignore unknown fields.
+  string rules_json = 5;
+}
+
+message OtaManifest {
+  string version = 1;
+  string artifact_sha256_hex = 2;
+  // Dev-reference HMAC-SHA256 over artifact bytes, hex encoded.
+  // Production should use Sigstore/cosign or TUF; see docs/security.md.
+  string signature_hex = 3;
+  uint64 size_bytes = 4;
+}
+
+message RegisterRequest {
+  DeviceIdentity identity = 1;
+  string reported_policy_version = 2;
+  string reported_software_version = 3;
+}
+
+message RegisterResponse {
+  bool accepted = 1;
+  uint64 desired_policy_version = 2;
+  Policy policy = 3;
+  string desired_software_version = 4;
+  OtaManifest pending_ota = 5;
+  bool has_pending_ota = 6;
+}
+
+message HeartbeatRequest {
+  string device_id = 1;
+  string reported_policy_version = 2;
+  string reported_software_version = 3;
+  HealthState health = 4;
+  ResourceUsage usage = 5;
+  uint64 active_connections = 6;
+}
+
+message HeartbeatResponse {
+  uint64 desired_policy_version = 1;
+  Policy policy = 2;
+  bool has_policy = 3;
+  string desired_software_version = 4;
+  OtaManifest pending_ota = 5;
+  bool has_pending_ota = 6;
+  // Monotonic sequence of the desired state; edge must ignore stale (<= seen) updates.
+  uint64 desired_seq = 7;
+}
+
+message EdgeReport {
+  string device_id = 1;
+  string reported_policy_version = 2;
+  string reported_software_version = 3;
+  HealthState health = 4;
+  ResourceUsage usage = 5;
+  uint64 active_connections = 6;
+  // Last applied cloud sequence number (for duplicate/stale suppression).
+  uint64 applied_seq = 7;
+}
+
+message CloudCommand {
+  uint64 seq = 1;
+  oneof command {
+    PolicyUpdate policy_update = 2;
+    OtaUpdate ota_update = 3;
+    Noop noop = 4;
+  }
+}
+
+message PolicyUpdate {
+  Policy policy = 1;
+}
+
+message OtaUpdate {
+  OtaManifest manifest = 1;
+}
+
+message Noop {
+}
+
+message TelemetryReport {
+  string device_id = 1;
+  ResourceUsage usage = 2;
+  uint64 connections_total = 3;
+  uint64 errors_total = 4;
+  uint64 bytes_in_total = 5;
+  uint64 bytes_out_total = 6;
+}
+
+message TelemetryAck {
+  bool ok = 1;
+}

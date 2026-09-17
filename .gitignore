@@ -1,0 +1,36 @@
+# Rust artifacts
+/target/
+**/target/
+
+# Certificates, keys, secrets (never commit)
+/certs/
+certs/
+*.key
+*.pem
+*.p12
+*.pfx
+.env
+.env.*
+edge-state.json
+*-state.json
+ota-journal.json
+
+# Benchmark + storm outputs
+storm-results.json
+/tmp/storm-*.json
+flamegraph.svg
+perf.data*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.orig
+
+# Attached source materials (JD/CV) must never be committed
+*.pdf
+
+# Binaries
+*.o
+*.so
